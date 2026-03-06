@@ -10,15 +10,18 @@ import (
 	"time"
 
 	"github.com/barelabs/koala/internal/service"
+	"github.com/barelabs/koala/internal/update"
 )
 
 type Server struct {
 	token   string
 	service *service.Service
+	updater *update.Manager
+	agent   update.Agent
 }
 
-func NewServer(token string, svc *service.Service) *Server {
-	return &Server{token: token, service: svc}
+func NewServer(token string, svc *service.Service, updater *update.Manager, agent update.Agent) *Server {
+	return &Server{token: token, service: svc, updater: updater, agent: agent}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -28,6 +31,17 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/mcp/tools/koala.get_zone_state", s.wrapAuth(s.getZoneState))
 	mux.HandleFunc("/mcp/tools/koala.check_package_at_door", s.wrapAuth(s.checkPackageAtDoor))
 	mux.HandleFunc("/ingest/frame", s.wrapAuth(s.ingestFrame))
+
+	mux.HandleFunc("/admin/updates/status", s.wrapAuth(s.updateStatus))
+	mux.HandleFunc("/admin/updates/check", s.wrapAuth(s.updateCheck))
+	mux.HandleFunc("/admin/updates/stage", s.wrapAuth(s.updateStage))
+	mux.HandleFunc("/admin/updates/apply", s.wrapAuth(s.updateApply))
+	mux.HandleFunc("/admin/updates/rollback", s.wrapAuth(s.updateRollback))
+
+	mux.HandleFunc("/agent/updates/health", s.wrapAuth(s.agentHealth))
+	mux.HandleFunc("/agent/updates/stage", s.wrapAuth(s.agentStage))
+	mux.HandleFunc("/agent/updates/apply", s.wrapAuth(s.agentApply))
+	mux.HandleFunc("/agent/updates/rollback", s.wrapAuth(s.agentRollback))
 	return mux
 }
 
@@ -199,6 +213,255 @@ func (s *Server) ingestFrame(w http.ResponseWriter, r *http.Request) {
 		"status":      "ok",
 		"explanation": "frame accepted",
 	})
+}
+
+func (s *Server) updateStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.updater == nil {
+		http.Error(w, "updates are not configured", http.StatusNotImplemented)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "update device status list",
+		"data": map[string]any{
+			"devices": s.updater.Status(),
+		},
+	})
+}
+
+func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		http.Error(w, "updates are not configured", http.StatusNotImplemented)
+		return
+	}
+	req, err := s.decodeToolRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	manifest, deviceIDs, err := parseUpdateInput(req.Input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.updater.Check(manifest, deviceIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "update eligibility evaluated",
+		"data": map[string]any{
+			"results": result,
+		},
+	})
+}
+
+func (s *Server) updateStage(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		http.Error(w, "updates are not configured", http.StatusNotImplemented)
+		return
+	}
+	req, err := s.decodeToolRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	manifest, deviceIDs, err := parseUpdateInput(req.Input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	devices, err := s.updater.Stage(manifest, deviceIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "update staged",
+		"data": map[string]any{
+			"devices": devices,
+		},
+	})
+}
+
+func (s *Server) updateApply(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		http.Error(w, "updates are not configured", http.StatusNotImplemented)
+		return
+	}
+	req, err := s.decodeToolRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	deviceIDs, err := readDeviceIDs(req.Input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	devices, err := s.updater.Apply(deviceIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "update applied",
+		"data": map[string]any{
+			"devices": devices,
+		},
+	})
+}
+
+func (s *Server) updateRollback(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		http.Error(w, "updates are not configured", http.StatusNotImplemented)
+		return
+	}
+	req, err := s.decodeToolRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	deviceIDs, err := readDeviceIDs(req.Input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	reason, _ := readOptionalString(req.Input, "reason")
+	devices, err := s.updater.Rollback(deviceIDs, reason)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "update rolled back",
+		"data": map[string]any{
+			"devices": devices,
+		},
+	})
+}
+
+func (s *Server) agentHealth(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		http.Error(w, "agent not configured", http.StatusNotImplemented)
+		return
+	}
+	health, err := s.agent.Health(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "agent health available",
+		"data":        health,
+	})
+}
+
+func (s *Server) agentStage(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		http.Error(w, "agent not configured", http.StatusNotImplemented)
+		return
+	}
+	var payload struct {
+		Manifest update.Manifest `json:"manifest"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.agent.Stage(r.Context(), payload.Manifest); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "agent staged update",
+	})
+}
+
+func (s *Server) agentApply(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		http.Error(w, "agent not configured", http.StatusNotImplemented)
+		return
+	}
+	if err := s.agent.Apply(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "agent applied update",
+	})
+}
+
+func (s *Server) agentRollback(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		http.Error(w, "agent not configured", http.StatusNotImplemented)
+		return
+	}
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+	if err := s.agent.Rollback(r.Context(), payload.Reason); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"explanation": "agent rolled back update",
+	})
+}
+
+func parseUpdateInput(input map[string]any) (update.Manifest, []string, error) {
+	raw, ok := input["manifest"]
+	if !ok {
+		return update.Manifest{}, nil, fmt.Errorf("manifest is required")
+	}
+	asMap, ok := raw.(map[string]any)
+	if !ok {
+		return update.Manifest{}, nil, fmt.Errorf("manifest must be an object")
+	}
+	manifest := update.Manifest{}
+	manifest.KeyID, _ = readOptionalString(asMap, "key_id")
+	manifest.Version, _ = readOptionalString(asMap, "version")
+	manifest.ArtifactURL, _ = readOptionalString(asMap, "artifact_url")
+	manifest.SHA256, _ = readOptionalString(asMap, "sha256")
+	manifest.Signature, _ = readOptionalString(asMap, "signature")
+	manifest.MinOrchestratorVersion, _ = readOptionalString(asMap, "min_orchestrator_version")
+	manifest.MinWorkerVersion, _ = readOptionalString(asMap, "min_worker_version")
+	manifest.CreatedAt, _ = readOptionalString(asMap, "created_at")
+	deviceIDs, err := readDeviceIDs(input)
+	if err != nil {
+		return update.Manifest{}, nil, err
+	}
+	return manifest, deviceIDs, nil
+}
+
+func readDeviceIDs(values map[string]any) ([]string, error) {
+	raw, ok := values["device_ids"]
+	if !ok {
+		return nil, nil
+	}
+	listRaw, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("device_ids must be an array")
+	}
+	ids := make([]string, 0, len(listRaw))
+	for _, v := range listRaw {
+		s, ok := v.(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			return nil, fmt.Errorf("device_ids must contain non-empty strings")
+		}
+		ids = append(ids, s)
+	}
+	return ids, nil
 }
 
 func readRequiredString(values map[string]any, key string) (string, error) {

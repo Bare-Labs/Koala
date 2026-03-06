@@ -30,6 +30,80 @@ All tools require `Authorization: Bearer <mcp_token>`.
 - `POST /mcp/tools/koala.get_zone_state` with `{ "input": { "zone_id": "front_door" } }`
 - `POST /mcp/tools/koala.check_package_at_door` with `{ "input": { "camera_id": "cam_front_1" } }`
 
+## Admin update APIs (MVP foundation)
+
+All update APIs require `Authorization: Bearer <mcp_token>`.
+
+- `GET /admin/updates/status`
+- `POST /admin/updates/check`
+- `POST /admin/updates/stage`
+- `POST /admin/updates/apply`
+- `POST /admin/updates/rollback`
+
+Device agent endpoints (called by orchestrator update executor):
+
+- `GET /agent/updates/health`
+- `POST /agent/updates/stage`
+- `POST /agent/updates/apply`
+- `POST /agent/updates/rollback`
+
+Manifest payload shape:
+
+```json
+{
+  "input": {
+    "manifest": {
+      "key_id": "key-2026-03",
+      "version": "0.2.1",
+      "artifact_url": "http://updates.local/koala-0.2.1.bundle.json",
+      "sha256": "<64-char-hex>",
+      "signature": "<base64-ed25519-signature>",
+      "min_orchestrator_version": "0.1.0-dev",
+      "min_worker_version": "0.1.0-dev"
+    },
+    "device_ids": ["koala-local"]
+  }
+}
+```
+
+Signature payload is the newline-joined fields:
+
+`version`, `artifact_url`, `sha256`, `created_at`, `min_orchestrator_version`, `min_worker_version`
+
+When `update.enabled=true`, all are required:
+- `update.public_key_base64` (Ed25519 verification key)
+- or rotating key config: `update.active_key_id`, `update.previous_keys`, and `update.public_keys`
+- `update.encryption_key_base64` (AES-256-GCM decryption key)
+
+The agent now expects `artifact_url` to point to an encrypted/signed bundle JSON, not a raw binary artifact.
+
+Staging/apply storage:
+
+- staged artifact: `<update.staging_dir>/<version>/artifact.bin`
+- staged manifest: `<update.staging_dir>/<version>/manifest.json`
+- active version marker: `<update.active_dir>/current_version`
+
+## Secure packaging command
+
+Generate encrypted/signed bundle + signed manifest:
+
+```bash
+go run ./cmd/koala-packager \
+  --artifact /path/to/koala-update.tar.gz \
+  --bundle-url http://updates.local/koala-update.bundle.json \
+  --key-id key-2026-03 \
+  --version 0.2.1 \
+  --private-key-base64 "$KOALA_UPDATE_PRIVATE_KEY_B64" \
+  --encryption-key-base64 "$KOALA_UPDATE_ENCRYPTION_KEY_B64" \
+  --min-orchestrator-version 0.1.0-dev \
+  --min-worker-version 0.1.0-dev \
+  --bundle-out /tmp/koala-update.bundle.json \
+  --manifest-out /tmp/koala-manifest.json
+```
+
+The generated bundle includes encrypted artifact bytes + bundle signature.
+The generated manifest includes plaintext artifact `sha256`, `created_at`, and manifest signature.
+
 ## Test
 
 ```bash

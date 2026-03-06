@@ -16,6 +16,7 @@ import (
 	"github.com/barelabs/koala/internal/mcp"
 	"github.com/barelabs/koala/internal/service"
 	"github.com/barelabs/koala/internal/state"
+	"github.com/barelabs/koala/internal/update"
 )
 
 func main() {
@@ -44,6 +45,31 @@ func main() {
 	aggregator := state.NewAggregator(time.Duration(cfg.Runtime.FreshnessWindow) * time.Second)
 	client := inference.NewHTTPClient(cfg.Worker.URL)
 	svc := service.New(registry, aggregator, client, cfg.Runtime.QueueSize)
+	var updater *update.Manager
+	var agent update.Agent
+	if cfg.Update.Enabled {
+		executor := update.NewHTTPExecutor(cfg.MCPToken, 3*time.Second)
+		updater = update.NewManager(cfg.Service.Version, "0.1.0-dev", cfg.Service.DeviceID, cfg.Service.Address, cfg.Service.Version, executor)
+		var verifier update.Verifier
+		if cfg.Update.PublicKeyBase64 != "" {
+			edVerifier, verr := update.NewEd25519VerifierFromBase64(cfg.Update.PublicKeyBase64)
+			if verr != nil {
+				log.Fatalf("invalid update public key: %v", verr)
+			}
+			verifier = edVerifier
+		} else {
+			rotatingVerifier, verr := update.NewRotatingVerifier(cfg.Update.ActiveKeyID, cfg.Update.PublicKeys, cfg.Update.PreviousKeys)
+			if verr != nil {
+				log.Fatalf("invalid rotating update key configuration: %v", verr)
+			}
+			verifier = rotatingVerifier
+		}
+		encryptionKey, kerr := update.ParseAES256KeyBase64(cfg.Update.EncryptionKeyBase64)
+		if kerr != nil {
+			log.Fatalf("invalid update encryption key: %v", kerr)
+		}
+		agent = update.NewFileAgent(cfg.Service.Version, cfg.Update.StagingDir, cfg.Update.ActiveDir, update.NewHTTPDownloader(10*time.Second), verifier, encryptionKey)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -67,7 +93,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      mcp.NewServer(cfg.MCPToken, svc).Routes(),
+		Handler:      mcp.NewServer(cfg.MCPToken, svc, updater, agent).Routes(),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 	}
