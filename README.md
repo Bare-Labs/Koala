@@ -124,6 +124,17 @@ The `/mcp` endpoint is a stateless MCP HTTP entrypoint for BearClaw-class
 agents. It supports `initialize`, `ping`, `tools/list`, and `tools/call` while
 the legacy `/mcp/tools/...` routes remain available for direct HTTP clients.
 
+When wiring Koala into BearClaw, use BearClaw's HTTP MCP transport in
+`mcp_servers`:
+
+```sh
+bareclaw config set mcp_servers "koala=http_mcp http://192.168.86.53:6705/mcp <mcp_token>"
+```
+
+BearClaw will discover the `koala.*` MCP tools from `/mcp` and expose them in
+its local tool catalog as `koala__get_system_health`, `koala__list_cameras`,
+`koala__get_zone_state`, and `koala__check_package_at_door`.
+
 Example direct tool route:
 
 - `POST /mcp/tools/koala.get_zone_state` with `{ "input": { "zone_id": "front_door" } }`
